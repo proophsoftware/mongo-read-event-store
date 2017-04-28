@@ -70,7 +70,10 @@ final class ReadOnlyMongoEventStoreFactory implements RequiresConfig, RequiresMa
             'connection' => [
                 'server' => 'mongodb://127.0.0.1/',
                 'uri_options' => [],
-                'driver_options' => []
+                'driver_options' => [
+                    //force usage of assoc instead of stdClass objects when returning data from mongodb
+                    ['typeMap' => ['root' => 'array', 'document' => 'array', 'array' => 'array']]
+                ]
             ],
         ];
     }
