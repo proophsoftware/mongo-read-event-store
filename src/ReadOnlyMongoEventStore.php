@@ -44,6 +44,16 @@ final class ReadOnlyMongoEventStore implements ReadOnlyEventStore
      */
     private $aggregateStreamNames;
 
+    const KNOWN_KEYS = [
+        '_id',
+        'version',
+        'event_name',
+        'payload',
+        'created_at',
+        'aggregate_id',
+        'aggregate_type',
+    ];
+
     public function __construct(MongoConnection $mongoConnection, MessageFactory $messageFactory, MessageConverter $messageConverter, array $aggregateStreamNames)
     {
         $this->mongoConnection = $mongoConnection;
@@ -104,8 +114,8 @@ final class ReadOnlyMongoEventStore implements ReadOnlyEventStore
 
         $cursor = $collection->find($query, $options);
 
-        return $this->mapCursor($cursor, function (array $event) {
-            return $this->eventDataToMessage($event);
+        return $this->mapCursor($cursor, function (array $event, $index) use ($fromNumber) {
+            return $this->eventDataToMessage($event, $fromNumber + $index);
         });
     }
 
@@ -123,11 +133,17 @@ final class ReadOnlyMongoEventStore implements ReadOnlyEventStore
 
         $query = $this->buildQuery($metadataMatcher);
 
+        $total = $collection->count($query);
+
         $options = [
             'sort' => ['created_at' => -1],
         ];
 
-        $options['skip'] = $fromNumber - 1;
+        if($fromNumber === PHP_INT_MAX || $fromNumber === null) {
+            $fromNumber = $total;
+        }
+
+        $options['skip'] = $total - $fromNumber;
 
         if ($count) {
             $options['limit'] = $count;
@@ -141,8 +157,8 @@ final class ReadOnlyMongoEventStore implements ReadOnlyEventStore
 
         $cursor = $collection->find($query, $options);
 
-        return $this->mapCursor($cursor, function (array $event) {
-            return $this->eventDataToMessage($event);
+        return $this->mapCursor($cursor, function (array $event, $index) use ($fromNumber) {
+            return $this->eventDataToMessage($event, $fromNumber - $index);
         });
     }
 
@@ -212,8 +228,23 @@ final class ReadOnlyMongoEventStore implements ReadOnlyEventStore
         return [];
     }
 
-    private function eventDataToMessage(array $eventData): Message
+    private function eventDataToMessage(array $eventData, int $position): Message
     {
+        $metadata = [];
+        foreach ($eventData as $k => $v) {
+            if($k === 'metadata') {
+                $metadata['_metadata'] = json_encode($v);
+                continue;
+            }
+
+            if(!in_array($k, self::KNOWN_KEYS)) {
+                $metadata[$k] = is_scalar($v)? $v : json_encode($v);
+                unset($eventData[$k]);
+            }
+        }
+
+        $eventData['metadata'] = $metadata;
+
         $eventData['created_at'] = \DateTimeImmutable::createFromFormat(
             'Y-m-d\TH:i:s.u',
             $eventData['created_at'],
@@ -221,6 +252,7 @@ final class ReadOnlyMongoEventStore implements ReadOnlyEventStore
         );
 
         $eventData['uuid'] = $eventData['_id'];
+        $eventData['metadata']['_position'] = $position . "";
         unset($eventData['_id']);
 
         return $this->messageFactory->createMessageFromArray($eventData['event_name'], $eventData);
@@ -254,6 +286,15 @@ final class ReadOnlyMongoEventStore implements ReadOnlyEventStore
                 case Operator::NOT_EQUALS:
                     $operator = '$ne';
                     break;
+                case Operator::REGEX:
+                    $operator = '$regex';
+                    break;
+                case Operator::IN:
+                    $operator = '$in';
+                    break;
+                case Operator::NOT_IN:
+                    $operator = '$nin';
+                    break;
             }
 
             switch ($field) {
@@ -266,8 +307,12 @@ final class ReadOnlyMongoEventStore implements ReadOnlyEventStore
                 case '_aggregate_id':
                     $field = 'aggregate_id';
                     break;
-                default:
-                    $field = 'metadata.' . $field;
+                case 'uuid':
+                    $field = '_id';
+                    break;
+                case 'message_name':
+                    $field = 'event_name';
+                    break;
             }
 
             $query[$field] = [$operator => $value];
